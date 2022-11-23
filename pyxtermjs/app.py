@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
-from flask import Flask, render_template
+from functools import partial
+from flask import Flask, render_template, request
 from flask_socketio import SocketIO
 import pty
 import os
@@ -11,6 +12,7 @@ import struct
 import fcntl
 import shlex
 import logging
+import signal
 import sys
 
 logging.getLogger("werkzeug").setLevel(logging.ERROR)
@@ -19,8 +21,13 @@ __version__ = "0.5.0.2"
 
 app = Flask(__name__, template_folder=".", static_folder=".", static_url_path="")
 app.config["SECRET_KEY"] = "secret!"
-app.config["fd"] = None
+# app.config[socketId]["fd"] = None
 app.config["child_pid"] = None
+
+# def SIGCHLDHandler(x: int, frame):
+#     os.waitpid(-1, os.WNOHANG)
+
+# signal.signal(signal.SIGCHLD, SIGCHLDHandler)
 socketio = SocketIO(app)
 
 
@@ -30,18 +37,19 @@ def set_winsize(fd, row, col, xpix=0, ypix=0):
     fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
 
 
-def read_and_forward_pty_output():
+def read_and_forward_pty_output(sid):
     max_read_bytes = 1024 * 20
     while True:
         socketio.sleep(0.01)
-        if app.config["fd"]:
+        if app.config[sid]["fd"]:
             timeout_sec = 0
-            (data_ready, _, _) = select.select([app.config["fd"]], [], [], timeout_sec)
+            (data_ready, _, _) = select.select([app.config[sid]["fd"]], [], [], timeout_sec)
             if data_ready:
-                output = os.read(app.config["fd"], max_read_bytes).decode(
+                output = os.read(app.config[sid]["fd"], max_read_bytes).decode(
                     errors="ignore"
                 )
-                socketio.emit("pty-output", {"output": output}, namespace="/pty")
+                logging.info(f"child {sid} prints {output}")
+                socketio.emit("pty-output", {"output": output}, namespace="/pty", to=sid)
 
 
 @app.route("/")
@@ -54,25 +62,25 @@ def pty_input(data):
     """write to the child pty. The pty sees this as if you are typing in a real
     terminal.
     """
-    if app.config["fd"]:
+    if app.config[request.sid]["fd"]:
         logging.debug("received input from browser: %s" % data["input"])
-        os.write(app.config["fd"], data["input"].encode())
+        os.write(app.config[request.sid]["fd"], data["input"].encode())
 
 
 @socketio.on("resize", namespace="/pty")
 def resize(data):
-    if app.config["fd"]:
+    if app.config[request.sid]["fd"]:
         logging.debug(f"Resizing window to {data['rows']}x{data['cols']}")
-        set_winsize(app.config["fd"], data["rows"], data["cols"])
+        set_winsize(app.config[request.sid]["fd"], data["rows"], data["cols"])
 
 
 @socketio.on("connect", namespace="/pty")
 def connect():
     """new client connected"""
     logging.info("new client connected")
-    if app.config["child_pid"]:
-        # already started child process, don't start another
-        return
+    # if app.config[child_pid]["fd"]:
+    #     # already started child process, don't start another
+    #     return
 
     # create child process attached to a pty we can read from and write to
     (child_pid, fd) = pty.fork()
@@ -84,15 +92,17 @@ def connect():
     else:
         # this is the parent process fork.
         # store child fd and pid
-        app.config["fd"] = fd
-        app.config["child_pid"] = child_pid
+        sockietId = request.sid
+        app.config[sockietId] = {}
+        app.config[sockietId]["fd"] = fd
+        app.config[sockietId]["child_pid"] = child_pid
         set_winsize(fd, 50, 50)
         cmd = " ".join(shlex.quote(c) for c in app.config["cmd"])
         # logging/print statements must go after this because... I have no idea why
         # but if they come before the background task never starts
-        socketio.start_background_task(target=read_and_forward_pty_output)
+        socketio.start_background_task(target=partial(read_and_forward_pty_output, sid=sockietId))
 
-        logging.info("child pid is " + child_pid)
+        logging.info(f"child pid is {child_pid}, socketId: {sockietId}")
         logging.info(
             f"starting background task with command `{cmd}` to continously read "
             "and forward pty output to client"
@@ -119,7 +129,7 @@ def main():
     parser.add_argument("--debug", action="store_true", help="debug the server")
     parser.add_argument("--version", action="store_true", help="print version and exit")
     parser.add_argument(
-        "--command", default="bash", help="Command to run in the terminal"
+        "--command", default="fish", help="Command to run in the terminal"
     )
     parser.add_argument(
         "--cmd-args",
