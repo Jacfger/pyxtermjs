@@ -9,4 +9,4 @@ The original repo was simply a proof of concept for running local terminal in br
 
 ## Install, any other questions.
 
-Refer to the original repo :D. All there is here is just some simple modifications to make multi-instances works. Maybe if there's bug I'll look into it.
+Refer to the original repo :D. All there is here is just some simple modifications to make multi-instances works. If there's bug about the multiple instances (and if anyone cares at all) the I'll look into it.
